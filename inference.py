@@ -53,7 +53,7 @@ class MentalHealthAudioPipeline:
         
         # Initialize feature extractor
         self.feature_extractor = SemanticFeatureExtractor(
-            device='cpu',
+            device=self.device,
             use_wav2vec=self.config['features']['use_wav2vec'],
             use_hubert=self.config['features']['use_hubert'],
             use_opensmile=self.config['features']['use_opensmile']

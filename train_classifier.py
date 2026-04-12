@@ -58,7 +58,7 @@ class ClassifierTrainer:
         
         # Initialize feature extractor
         self.feature_extractor = SemanticFeatureExtractor(
-            device='cpu',
+            device=self.device,
             use_wav2vec=False,  # Don't need for classifier
             use_hubert=False,
             use_opensmile=False
