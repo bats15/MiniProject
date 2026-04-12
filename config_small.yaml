@@ -1,0 +1,52 @@
+data:
+  target_sr: 16000
+  n_fft: 1024
+  hop_length: 512
+  n_mels: 80
+  max_audio_length: 10
+  train_split: 0.8
+  val_split: 0.1
+  test_split: 0.1
+
+model:
+  encoder:
+    input_dim: 56
+    latent_dim: 256
+    hidden_dims: [512, 384]
+    dropout: 0.1
+  diffusion:
+    in_channels: 1
+    condition_dim: 256
+    time_dim: 256
+    base_channels: 64
+    num_timesteps: 1000
+    beta_start: 0.0001
+    beta_end: 0.02
+  classifier:
+    num_classes: 4
+    dropout: 0.5
+
+training:
+  batch_size: 1
+  num_epochs: 100
+  learning_rate: 0.0001
+  weight_decay: 0.01
+  gradient_clip: 1.0
+  checkpoint_interval: 10
+  log_interval: 1
+  num_workers: 0
+
+paths:
+  data_dir: "./data_small"
+  checkpoint_dir: "./checkpoints_small"
+  output_dir: "./outputs_small"
+  log_dir: "./logs_small"
+
+device: "cpu"
+
+features:
+  use_wav2vec: false
+  use_hubert: false
+  use_opensmile: false
+  wav2vec_model: "facebook/wav2vec2-base"
+  hubert_model: "facebook/hubert-base-ls960"
