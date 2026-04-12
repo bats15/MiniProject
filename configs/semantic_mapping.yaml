@@ -1,0 +1,32 @@
+device: "cuda"
+
+paths:
+  data_dir: "./data"
+  audio_subdir: "audio"
+  feature_subdir: "features"
+  checkpoint_dir: "./checkpoints"
+  log_dir: "./logs"
+
+training:
+  batch_size: 32
+  num_epochs: 50
+  learning_rate: 0.0001
+  weight_decay: 0.0001
+  gradient_clip: 1.0
+  checkpoint_interval: 5
+  num_workers: 0
+
+semantic_mapping:
+  feature_type: "egemaps"  # egemaps or mfcc
+  architecture: "cnn"  # cnn, cnn_lstm, transformer
+  target_sr: 16000
+  frame_size_ms: 25.0
+  hop_size_ms: 10.0
+  normalize_features: true
+  cache_dir: "./cache"
+  train_split: 0.8
+  val_split: 0.1
+  test_split: 0.1
+  seed: 42
+  latent_dim: 64
+  channel_noise_std: 0.0

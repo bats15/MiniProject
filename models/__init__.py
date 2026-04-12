@@ -1,6 +1,15 @@
-"""Compatibility package for model modules."""
+"""Model package for audio semantic communication."""
 
-from .encoder import SemanticEncoder, TransformerEncoder, VariationalEncoder
-from .diffusion import DiffusionUNet, GaussianDiffusion
-from .classifier import MentalHealthClassifier, ResNetClassifier, AttentionClassifier
+from .semantic_mapper import (
+    WaveformToSemanticCNN,
+    WaveformToSemanticCNNLSTM,
+    WaveformToSemanticTransformer,
+    build_semantic_mapper,
+)
 
+__all__ = [
+    "WaveformToSemanticCNN",
+    "WaveformToSemanticCNNLSTM",
+    "WaveformToSemanticTransformer",
+    "build_semantic_mapper",
+]
