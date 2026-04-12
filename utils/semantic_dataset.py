@@ -1,4 +1,4 @@
-"""Dataset for frame-level waveform to semantic-feature mapping on DAIC-WOZ."""
+"""Dataset for frame-level audio-to-semantic mapping on DAIC-WOZ."""
 
 from __future__ import annotations
 
@@ -22,7 +22,7 @@ class ParticipantSample:
 
 
 class DAICSemanticMappingDataset(Dataset):
-    """Frame-level dataset where X is waveform frames and y is semantic feature frames."""
+    """Frame-level dataset where X can be waveform or spectrogram frames and y is semantic features."""
 
     def __init__(
         self,
@@ -30,9 +30,13 @@ class DAICSemanticMappingDataset(Dataset):
         audio_subdir: str = "audio",
         feature_subdir: str = "features",
         feature_type: str = "egemaps",
+        input_representation: str = "spectrogram",
         target_sr: int = 16000,
         frame_size_ms: float = 25.0,
         hop_size_ms: float = 10.0,
+        n_mels: int = 64,
+        spectrogram_patch_frames: int = 5,
+        spectrogram_n_fft: Optional[int] = None,
         normalize_features: bool = True,
         cache_dir: Optional[str] = None,
     ):
@@ -42,6 +46,12 @@ class DAICSemanticMappingDataset(Dataset):
         self.feature_type = feature_type.lower()
         if self.feature_type not in {"egemaps", "mfcc"}:
             raise ValueError("feature_type must be 'egemaps' or 'mfcc'")
+        self.input_representation = input_representation.lower()
+        if self.input_representation not in {"waveform", "spectrogram"}:
+            raise ValueError("input_representation must be 'waveform' or 'spectrogram'")
+        self.n_mels = int(n_mels)
+        self.spectrogram_patch_frames = int(spectrogram_patch_frames)
+        self.spectrogram_n_fft = spectrogram_n_fft
 
         self.preprocessor = SemanticAudioPreprocessor(
             target_sr=target_sr,
@@ -105,7 +115,14 @@ class DAICSemanticMappingDataset(Dataset):
             return None
         cache_root = self.cache_dir / "semantic_mapping"
         cache_root.mkdir(parents=True, exist_ok=True)
-        return cache_root / f"{participant_id}_{self.feature_type}_{self.preprocessor.target_sr}.npz"
+        repr_tag = (
+            f"spec_m{self.n_mels}_p{self.spectrogram_patch_frames}"
+            if self.input_representation == "spectrogram"
+            else "wave"
+        )
+        return cache_root / (
+            f"{participant_id}_{self.feature_type}_{repr_tag}_{self.preprocessor.target_sr}.npz"
+        )
 
     def _load_participant_arrays(self, sample: ParticipantSample) -> Tuple[np.ndarray, np.ndarray]:
         cache_path = self._participant_cache_path(sample.participant_id)
@@ -114,7 +131,18 @@ class DAICSemanticMappingDataset(Dataset):
             return cache["X"].astype(np.float32), cache["y"].astype(np.float32)
 
         audio = self.preprocessor.load_audio(str(sample.audio_path))
-        audio_frames = self.preprocessor.frame_audio(audio)
+        if self.input_representation == "spectrogram":
+            spectrogram = self.preprocessor.waveform_to_mel_spectrogram(
+                audio,
+                n_mels=self.n_mels,
+                n_fft=self.spectrogram_n_fft,
+            )
+            audio_frames = self.preprocessor.frame_spectrogram(
+                spectrogram,
+                patch_frames=self.spectrogram_patch_frames,
+            )
+        else:
+            audio_frames = self.preprocessor.frame_audio(audio)
         feature_frames = self.preprocessor.load_feature_csv(str(sample.feature_path))
         audio_frames, feature_frames = self.preprocessor.align_frames(audio_frames, feature_frames)
 
@@ -153,7 +181,13 @@ class DAICSemanticMappingDataset(Dataset):
 
     @property
     def frame_samples(self) -> int:
-        return int(self.X.shape[1])
+        if self.X.ndim == 2:
+            return int(self.X.shape[1])
+        return int(np.prod(self.X.shape[1:]))
+
+    @property
+    def input_shape(self) -> Tuple[int, ...]:
+        return tuple(self.X.shape[1:])
 
     @property
     def feature_dim(self) -> int:
@@ -163,10 +197,16 @@ class DAICSemanticMappingDataset(Dataset):
         return len(self.X)
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        return {
-            "waveform_frame": torch.from_numpy(self.X[idx]),
+        model_input = torch.from_numpy(self.X[idx])
+        item: Dict[str, torch.Tensor] = {
+            "model_input": model_input,
             "semantic_target": torch.from_numpy(self.y[idx]),
         }
+        if self.input_representation == "spectrogram":
+            item["spectrogram_frame"] = model_input
+        else:
+            item["waveform_frame"] = model_input
+        return item
 
 
 def create_semantic_mapping_dataloaders(
@@ -174,11 +214,15 @@ def create_semantic_mapping_dataloaders(
     audio_subdir: str,
     feature_subdir: str,
     feature_type: str,
+    input_representation: str,
     batch_size: int,
     num_workers: int,
     target_sr: int = 16000,
     frame_size_ms: float = 25.0,
     hop_size_ms: float = 10.0,
+    n_mels: int = 64,
+    spectrogram_patch_frames: int = 5,
+    spectrogram_n_fft: Optional[int] = None,
     normalize_features: bool = True,
     cache_dir: Optional[str] = None,
     train_split: float = 0.8,
@@ -195,9 +239,13 @@ def create_semantic_mapping_dataloaders(
         audio_subdir=audio_subdir,
         feature_subdir=feature_subdir,
         feature_type=feature_type,
+        input_representation=input_representation,
         target_sr=target_sr,
         frame_size_ms=frame_size_ms,
         hop_size_ms=hop_size_ms,
+        n_mels=n_mels,
+        spectrogram_patch_frames=spectrogram_patch_frames,
+        spectrogram_n_fft=spectrogram_n_fft,
         normalize_features=normalize_features,
         cache_dir=cache_dir,
     )

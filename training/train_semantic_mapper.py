@@ -52,11 +52,15 @@ class SemanticMapperTrainer:
             audio_subdir=self.config["paths"]["audio_subdir"],
             feature_subdir=self.config["paths"]["feature_subdir"],
             feature_type=train_cfg["feature_type"],
+            input_representation=train_cfg.get("input_representation", "spectrogram"),
             batch_size=self.config["training"]["batch_size"],
             num_workers=self.config["training"]["num_workers"],
             target_sr=train_cfg["target_sr"],
             frame_size_ms=train_cfg["frame_size_ms"],
             hop_size_ms=train_cfg["hop_size_ms"],
+            n_mels=train_cfg.get("n_mels", 64),
+            spectrogram_patch_frames=train_cfg.get("spectrogram_patch_frames", 5),
+            spectrogram_n_fft=train_cfg.get("spectrogram_n_fft"),
             normalize_features=train_cfg["normalize_features"],
             cache_dir=train_cfg.get("cache_dir"),
             train_split=train_cfg["train_split"],
@@ -69,8 +73,11 @@ class SemanticMapperTrainer:
             architecture=train_cfg["architecture"],
             frame_samples=self.dataset.frame_samples,
             feature_dim=self.dataset.feature_dim,
+            input_shape=self.dataset.input_shape,
             latent_dim=train_cfg.get("latent_dim", 0),
             noise_std=train_cfg.get("channel_noise_std", 0.0),
+            interpolation_scale=train_cfg.get("interpolation_scale", 1.0),
+            denoiser_channels=train_cfg.get("denoiser_channels", 64),
         ).to(self.device)
 
         self.optimizer = Adam(
@@ -85,7 +92,7 @@ class SemanticMapperTrainer:
 
         print(f"Device: {self.device}")
         print(f"Dataset size: {len(self.dataset)} frames")
-        print(f"Input frame samples: {self.dataset.frame_samples}")
+        print(f"Input shape: {self.dataset.input_shape}")
         print(f"Target feature dim: {self.dataset.feature_dim}")
 
     def _run_epoch(self, dataloader, train: bool) -> Dict[str, float]:
@@ -99,7 +106,7 @@ class SemanticMapperTrainer:
         total = 0
 
         for batch in tqdm(dataloader, desc="train" if train else "val"):
-            x = batch["waveform_frame"].to(self.device)
+            x = batch.get("model_input", batch.get("waveform_frame")).to(self.device)
             y = batch["semantic_target"].to(self.device)
 
             if train:

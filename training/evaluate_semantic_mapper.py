@@ -31,11 +31,15 @@ def main() -> None:
         audio_subdir=config["paths"]["audio_subdir"],
         feature_subdir=config["paths"]["feature_subdir"],
         feature_type=config["semantic_mapping"]["feature_type"],
+        input_representation=config["semantic_mapping"].get("input_representation", "spectrogram"),
         batch_size=config["training"]["batch_size"],
         num_workers=config["training"]["num_workers"],
         target_sr=config["semantic_mapping"]["target_sr"],
         frame_size_ms=config["semantic_mapping"]["frame_size_ms"],
         hop_size_ms=config["semantic_mapping"]["hop_size_ms"],
+        n_mels=config["semantic_mapping"].get("n_mels", 64),
+        spectrogram_patch_frames=config["semantic_mapping"].get("spectrogram_patch_frames", 5),
+        spectrogram_n_fft=config["semantic_mapping"].get("spectrogram_n_fft"),
         normalize_features=config["semantic_mapping"]["normalize_features"],
         cache_dir=config["semantic_mapping"].get("cache_dir"),
         train_split=config["semantic_mapping"]["train_split"],
@@ -48,8 +52,11 @@ def main() -> None:
         architecture=config["semantic_mapping"]["architecture"],
         frame_samples=dataset.frame_samples,
         feature_dim=dataset.feature_dim,
+        input_shape=dataset.input_shape,
         latent_dim=config["semantic_mapping"].get("latent_dim", 0),
         noise_std=0.0,
+        interpolation_scale=config["semantic_mapping"].get("interpolation_scale", 1.0),
+        denoiser_channels=config["semantic_mapping"].get("denoiser_channels", 64),
     ).to(device)
 
     checkpoint = torch.load(Path(args.checkpoint), map_location=device)
@@ -62,7 +69,7 @@ def main() -> None:
 
     with torch.no_grad():
         for batch in tqdm(test_loader, desc="test"):
-            x = batch["waveform_frame"].to(device)
+            x = batch.get("model_input", batch.get("waveform_frame")).to(device)
             y = batch["semantic_target"].to(device)
             y_hat = model(x)
 

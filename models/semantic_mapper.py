@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Dict, Tuple
+from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 class _BottleneckHead(nn.Module):
@@ -171,12 +172,104 @@ class WaveformToSemanticTransformer(nn.Module):
         return y_hat
 
 
+class SpectrogramSemanticCommNet(nn.Module):
+    """Spectrogram-domain semantic communication pipeline.
+
+    Semantic Extraction -> Compression -> Channel -> Interpolation -> Denoising -> Reconstruction
+    """
+
+    def __init__(
+        self,
+        input_shape: Tuple[int, ...],
+        feature_dim: int,
+        encoder_channels: int = 64,
+        latent_dim: int = 64,
+        noise_std: float = 0.0,
+        interpolation_scale: float = 1.0,
+        denoiser_channels: int = 64,
+    ):
+        super().__init__()
+        if len(input_shape) != 2:
+            raise ValueError("SpectrogramSemanticCommNet expects input_shape=(n_mels, patch_frames)")
+
+        self.input_shape = input_shape
+        self.feature_dim = feature_dim
+        self.noise_std = float(noise_std)
+        self.interpolation_scale = float(interpolation_scale)
+
+        self.semantic_extractor = nn.Sequential(
+            nn.Conv2d(1, 32, kernel_size=3, padding=1),
+            nn.BatchNorm2d(32),
+            nn.ReLU(),
+            nn.Conv2d(32, encoder_channels, kernel_size=3, padding=1),
+            nn.BatchNorm2d(encoder_channels),
+            nn.ReLU(),
+        )
+
+        self.compressor = nn.Conv1d(encoder_channels, latent_dim, kernel_size=1)
+
+        self.denoiser = nn.Sequential(
+            nn.Conv1d(latent_dim, denoiser_channels, kernel_size=3, padding=1),
+            nn.ReLU(),
+            nn.Conv1d(denoiser_channels, latent_dim, kernel_size=3, padding=1),
+            nn.ReLU(),
+        )
+
+        self.reconstructor = nn.Sequential(
+            nn.AdaptiveAvgPool1d(1),
+            nn.Flatten(),
+            nn.Linear(latent_dim, feature_dim),
+        )
+
+    def _channel(self, z_seq: torch.Tensor) -> torch.Tensor:
+        if self.training and self.noise_std > 0:
+            z_seq = z_seq + torch.randn_like(z_seq) * self.noise_std
+        return z_seq
+
+    def _interpolate(self, z_seq: torch.Tensor) -> torch.Tensor:
+        if self.interpolation_scale <= 0:
+            raise ValueError("interpolation_scale must be positive")
+        if abs(self.interpolation_scale - 1.0) < 1e-6:
+            return z_seq
+        return F.interpolate(
+            z_seq,
+            scale_factor=self.interpolation_scale,
+            mode="linear",
+            align_corners=False,
+        )
+
+    def forward(self, x: torch.Tensor, return_latent: bool = False):
+        if x.ndim == 2:
+            x = x.unsqueeze(-1)
+        if x.ndim != 3:
+            raise ValueError("Expected spectrogram input with shape [B, n_mels, patch_frames]")
+
+        x = x.unsqueeze(1)
+        feat_map = self.semantic_extractor(x)
+
+        temporal_tokens = feat_map.mean(dim=2)
+
+        z_seq = self.compressor(temporal_tokens)
+        z_seq = self._channel(z_seq)
+        z_seq = self._interpolate(z_seq)
+        z_seq = self.denoiser(z_seq)
+
+        y_hat = self.reconstructor(z_seq)
+        z = z_seq.mean(dim=-1)
+        if return_latent:
+            return y_hat, z
+        return y_hat
+
+
 def build_semantic_mapper(
     architecture: str,
-    frame_samples: int,
+    frame_samples: Optional[int],
     feature_dim: int,
+    input_shape: Optional[Tuple[int, ...]] = None,
     latent_dim: int = 0,
     noise_std: float = 0.0,
+    interpolation_scale: float = 1.0,
+    denoiser_channels: int = 64,
 ) -> nn.Module:
     """Factory for semantic mapper architectures."""
     arch = architecture.lower()
@@ -187,10 +280,27 @@ def build_semantic_mapper(
     }
 
     if arch == "cnn":
+        if frame_samples is None:
+            raise ValueError("frame_samples is required for cnn architecture")
         return WaveformToSemanticCNN(frame_samples, feature_dim, **common_kwargs)
     if arch == "cnn_lstm":
+        if frame_samples is None:
+            raise ValueError("frame_samples is required for cnn_lstm architecture")
         return WaveformToSemanticCNNLSTM(frame_samples, feature_dim, **common_kwargs)
     if arch == "transformer":
+        if frame_samples is None:
+            raise ValueError("frame_samples is required for transformer architecture")
         return WaveformToSemanticTransformer(frame_samples, feature_dim, **common_kwargs)
+    if arch == "spectrogram_semcom":
+        if input_shape is None:
+            raise ValueError("input_shape is required for spectrogram_semcom architecture")
+        return SpectrogramSemanticCommNet(
+            input_shape=input_shape,
+            feature_dim=feature_dim,
+            latent_dim=latent_dim if latent_dim > 0 else 64,
+            noise_std=noise_std,
+            interpolation_scale=interpolation_scale,
+            denoiser_channels=denoiser_channels,
+        )
 
     raise ValueError(f"Unsupported architecture: {architecture}")

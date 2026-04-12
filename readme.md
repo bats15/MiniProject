@@ -4,7 +4,11 @@ This repository contains a cleaned, audio-only implementation for frame-level se
 
 The model learns:
 
-waveform frame -> semantic feature vector (eGeMAPS or MFCC)
+spectrogram patch (default) or waveform frame -> semantic feature vector (eGeMAPS or MFCC)
+
+Primary training path now enforces spectrogram-first preprocessing:
+
+audio -> mel-spectrogram -> semantic communication mapper -> semantic feature vector
 
 ## Active Project Structure
 
@@ -66,20 +70,20 @@ Default path resolution is fully relative for portability.
 Train:
 
 ```bash
-python main.py train --config configs/semantic_mapping.yaml
+$env:PYTHONPATH='.'; & ".venv/Scripts/python.exe" main.py train --config configs/semantic_mapping.yaml
 ```
 
 Evaluate:
 
 ```bash
-python main.py eval --config configs/semantic_mapping.yaml --checkpoint checkpoints/semantic_mapper/best.pt
+$env:PYTHONPATH='.'; & ".venv/Scripts/python.exe" main.py eval --config configs/semantic_mapping.yaml --checkpoint checkpoints/semantic_mapper/best.pt
 ```
 
 Direct scripts (optional):
 
 ```bash
-python training/train_semantic_mapper.py --config configs/semantic_mapping.yaml
-python training/evaluate_semantic_mapper.py --config configs/semantic_mapping.yaml --checkpoint checkpoints/semantic_mapper/best.pt
+$env:PYTHONPATH='.'; & ".venv/Scripts/python.exe" training/train_semantic_mapper.py --config configs/semantic_mapping.yaml
+$env:PYTHONPATH='.'; & ".venv/Scripts/python.exe" training/evaluate_semantic_mapper.py --config configs/semantic_mapping.yaml --checkpoint checkpoints/semantic_mapper/best.pt
 ```
 
 ## Notes
@@ -87,6 +91,25 @@ python training/evaluate_semantic_mapper.py --config configs/semantic_mapping.ya
 - GPU is used automatically when CUDA is available.
 - Training prints CUDA device and VRAM.
 - Temporary data-flow shape logging is included in the trainer.
+- Spectrogram conversion is the first preprocessing step for the default pipeline.
+- Added semantic communication stages in the spectrogram model path: extraction -> compression -> channel noise -> interpolation -> denoising -> reconstruction.
+
+## Training and Analysis Snapshot
+
+- Training executed with existing config:
+	- $env:PYTHONPATH='.'; & ".venv/Scripts/python.exe" main.py train --config configs/semantic_mapping.yaml
+- Trained checkpoints are stored in:
+	- checkpoints/semantic_mapper/
+	- best model: checkpoints/semantic_mapper/best.pt
+- Evaluation executed with existing config:
+	- $env:PYTHONPATH='.'; & ".venv/Scripts/python.exe" main.py eval --config configs/semantic_mapping.yaml --checkpoint checkpoints/semantic_mapper/best.pt
+- Structured analysis (validation/test metrics, noise robustness, temporal and feature analysis):
+	- $env:PYTHONPATH='.'; & ".venv/Scripts/python.exe" training/analyze_semantic_mapper.py --config configs/semantic_mapping.yaml --checkpoint checkpoints/semantic_mapper/best.pt --output analysis/semantic_performance_report.json
+	- report: analysis/semantic_performance_report.json
+	- artifacts (plots, csv, and listenable reconstructed audio previews):
+		- $env:PYTHONPATH='.'; & ".venv/Scripts/python.exe" training/analyze_semantic_mapper.py --config configs/semantic_mapping.yaml --checkpoint checkpoints/semantic_mapper/best.pt --output analysis/semantic_performance_report.json --artifacts_dir analysis/artifacts
+		- plots: analysis/artifacts/plots/
+		- audio previews: analysis/artifacts/audio_previews/
 
 ## Removed from Scope
 

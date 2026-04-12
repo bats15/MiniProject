@@ -57,6 +57,58 @@ class SemanticAudioPreprocessor:
         framed = np.lib.stride_tricks.as_strided(audio, shape=shape, strides=strides)
         return np.array(framed, dtype=np.float32, copy=True)
 
+    def waveform_to_mel_spectrogram(
+        self,
+        audio: np.ndarray,
+        n_mels: int = 64,
+        n_fft: Optional[int] = None,
+        power: float = 2.0,
+    ) -> np.ndarray:
+        """Convert waveform into log-mel spectrogram as primary representation."""
+        if audio.size == 0:
+            return np.zeros((n_mels, 0), dtype=np.float32)
+
+        fft_size = int(n_fft) if n_fft is not None else int(2 ** np.ceil(np.log2(self.frame_size_samples)))
+        fft_size = max(fft_size, self.frame_size_samples)
+
+        mel = librosa.feature.melspectrogram(
+            y=audio,
+            sr=self.target_sr,
+            n_fft=fft_size,
+            hop_length=self.hop_size_samples,
+            win_length=self.frame_size_samples,
+            n_mels=n_mels,
+            power=power,
+            center=False,
+        )
+        mel_db = librosa.power_to_db(mel, ref=np.max)
+        return mel_db.astype(np.float32)
+
+    @staticmethod
+    def frame_spectrogram(spectrogram: np.ndarray, patch_frames: int = 5) -> np.ndarray:
+        """Create time-centered spectrogram patches of shape (T, n_mels, patch_frames)."""
+        if spectrogram.ndim != 2:
+            raise ValueError("spectrogram must have shape (n_mels, time_frames)")
+        if patch_frames <= 0:
+            raise ValueError("patch_frames must be positive")
+
+        n_mels, time_frames = spectrogram.shape
+        if time_frames == 0:
+            return np.zeros((0, n_mels, patch_frames), dtype=np.float32)
+
+        if patch_frames == 1:
+            return spectrogram.T[:, :, None].astype(np.float32)
+
+        left = patch_frames // 2
+        right = patch_frames - left - 1
+        padded = np.pad(spectrogram, ((0, 0), (left, right)), mode="edge")
+
+        patches = []
+        for t in range(time_frames):
+            patch = padded[:, t : t + patch_frames]
+            patches.append(patch)
+        return np.asarray(patches, dtype=np.float32)
+
     def load_feature_csv(
         self,
         csv_path: str,
@@ -97,9 +149,11 @@ class SemanticAudioPreprocessor:
         """Trim audio/feature frames to the same number of frames."""
         aligned_len = min(len(audio_frames), len(feature_frames))
         if aligned_len <= 0:
+            audio_tail = audio_frames.shape[1:] if audio_frames.ndim >= 2 else ()
+            feat_tail = feature_frames.shape[1:] if feature_frames.ndim >= 2 else ()
             return (
-                np.zeros((0, audio_frames.shape[1] if audio_frames.ndim == 2 else 0), dtype=np.float32),
-                np.zeros((0, feature_frames.shape[1] if feature_frames.ndim == 2 else 0), dtype=np.float32),
+                np.zeros((0, *audio_tail), dtype=np.float32),
+                np.zeros((0, *feat_tail), dtype=np.float32),
             )
         return audio_frames[:aligned_len], feature_frames[:aligned_len]
 

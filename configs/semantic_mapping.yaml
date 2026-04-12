@@ -18,10 +18,14 @@ training:
 
 semantic_mapping:
   feature_type: "egemaps"  # egemaps or mfcc
-  architecture: "cnn"  # cnn, cnn_lstm, transformer
+  architecture: "spectrogram_semcom"  # spectrogram_semcom, cnn, cnn_lstm, transformer
+  input_representation: "spectrogram"  # spectrogram (default) or waveform
   target_sr: 16000
   frame_size_ms: 25.0
   hop_size_ms: 10.0
+  n_mels: 64
+  spectrogram_patch_frames: 5
+  spectrogram_n_fft: null
   normalize_features: true
   cache_dir: "./cache"
   train_split: 0.8
@@ -30,3 +34,5 @@ semantic_mapping:
   seed: 42
   latent_dim: 64
   channel_noise_std: 0.0
+  interpolation_scale: 1.0
+  denoiser_channels: 64
