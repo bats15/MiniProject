@@ -1,4 +1,5 @@
-venv
+venv/*
+.venv/*
 DATA
 data_small
 logs_small
