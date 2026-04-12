@@ -4,3 +4,4 @@ DATA
 data_small
 logs_small
 data_test
+analysis/*

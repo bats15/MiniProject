@@ -164,30 +164,32 @@ def _resolve_audio_path(dataset, participant: int) -> Path:
 
 def _extract_reference_clip(
     audio_path: Path,
-    frame_index: int,
+    start_frame: int,
+    num_frames: int,
     target_sr: int,
     frame_size_samples: int,
     hop_size_samples: int,
 ) -> np.ndarray:
     audio, _ = librosa.load(str(audio_path), sr=target_sr, mono=True)
-    start = frame_index * hop_size_samples
-    end = start + frame_size_samples
+    start = max(0, int(start_frame)) * hop_size_samples
+    end = start + (max(1, int(num_frames)) - 1) * hop_size_samples + frame_size_samples
     if start >= len(audio):
         return np.zeros(frame_size_samples, dtype=np.float32)
     clip = audio[start:end]
-    if len(clip) < frame_size_samples:
-        clip = np.pad(clip, (0, frame_size_samples - len(clip)), mode="constant")
+    min_len = (max(1, int(num_frames)) - 1) * hop_size_samples + frame_size_samples
+    if len(clip) < min_len:
+        clip = np.pad(clip, (0, min_len - len(clip)), mode="constant")
     return clip.astype(np.float32)
 
 
-def _reconstruct_from_mel_patch(
-    mel_patch_db: np.ndarray,
+def _reconstruct_from_mel_sequence(
+    mel_sequence_db: np.ndarray,
     target_sr: int,
     n_fft: int,
     hop_size_samples: int,
     frame_size_samples: int,
 ) -> np.ndarray:
-    mel_power = librosa.db_to_power(mel_patch_db)
+    mel_power = librosa.db_to_power(mel_sequence_db)
     wav = librosa.feature.inverse.mel_to_audio(
         M=mel_power,
         sr=target_sr,
@@ -204,6 +206,31 @@ def _reconstruct_from_mel_patch(
     return wav.astype(np.float32)
 
 
+def _collect_window_indices(dataset, participant: int, center_frame: int, half_window: int) -> List[int]:
+    indices: List[int] = []
+    start_frame = center_frame - half_window
+    end_frame = center_frame + half_window
+    for idx, meta in enumerate(dataset.index_meta):
+        if int(meta["participant"]) != int(participant):
+            continue
+        frame = int(meta["frame"])
+        if start_frame <= frame <= end_frame:
+            indices.append(idx)
+    indices.sort(key=lambda i: int(dataset.index_meta[i]["frame"]))
+    return indices
+
+
+def _build_mel_sequence_from_window(dataset, window_indices: List[int]) -> np.ndarray:
+    first = dataset.X[window_indices[0]]
+    if first.ndim != 2:
+        raise ValueError("Spectrogram previews require input representation with shape (n_mels, patch_frames)")
+    patch_frames = int(first.shape[1])
+    center_col = patch_frames // 2
+    cols = [dataset.X[i][:, center_col] for i in window_indices]
+    mel_seq = np.stack(cols, axis=1)
+    return mel_seq.astype(np.float32)
+
+
 def _save_audio_previews(
     dataset,
     best_samples: List[Dict[str, float]],
@@ -211,12 +238,15 @@ def _save_audio_previews(
     target_sr: int,
     n_fft: int,
     out_dir: Path,
+    preview_seconds: float = 2.0,
 ) -> None:
     audio_dir = out_dir / "audio_previews"
     audio_dir.mkdir(parents=True, exist_ok=True)
 
     frame_size_samples = dataset.preprocessor.frame_size_samples
     hop_size_samples = dataset.preprocessor.hop_size_samples
+    approx_frames = max(1, int(round(float(preview_seconds) * target_sr / hop_size_samples)))
+    half_window = max(1, approx_frames // 2)
 
     for group_name, records in (("best", best_samples), ("worst", worst_samples)):
         for rank, rec in enumerate(records, start=1):
@@ -224,27 +254,108 @@ def _save_audio_previews(
             participant = int(rec["participant"])
             frame = int(rec["frame"])
 
-            mel_patch = dataset.X[base_idx]
-            recon_wav = _reconstruct_from_mel_patch(
-                mel_patch_db=mel_patch,
+            if dataset.X.ndim == 3:
+                window_indices = _collect_window_indices(dataset, participant, frame, half_window)
+                if not window_indices:
+                    window_indices = [base_idx]
+                mel_seq = _build_mel_sequence_from_window(dataset, window_indices)
+                recon_wav = _reconstruct_from_mel_sequence(
+                    mel_sequence_db=mel_seq,
+                    target_sr=target_sr,
+                    n_fft=n_fft,
+                    hop_size_samples=hop_size_samples,
+                    frame_size_samples=frame_size_samples,
+                )
+                start_frame = int(dataset.index_meta[window_indices[0]]["frame"])
+                num_frames = len(window_indices)
+            else:
+                # Waveform input fallback: export centered raw frame as both recon/reference proxy.
+                recon_wav = dataset.X[base_idx].astype(np.float32)
+                start_frame = frame
+                num_frames = 1
+
+            if recon_wav.size < int(0.25 * target_sr):
+                # Guardrail against ultra-short outputs by simple tiling to audible length.
+                repeats = int(np.ceil((0.25 * target_sr) / max(recon_wav.size, 1)))
+                recon_wav = np.tile(recon_wav, repeats)
+
+            audio_path = _resolve_audio_path(dataset, participant)
+            ref_wav = _extract_reference_clip(
+                audio_path=audio_path,
+                start_frame=start_frame,
+                num_frames=num_frames,
+                target_sr=target_sr,
+                frame_size_samples=frame_size_samples,
+                hop_size_samples=hop_size_samples,
+            )
+
+            if ref_wav.size < int(0.25 * target_sr):
+                repeats = int(np.ceil((0.25 * target_sr) / max(ref_wav.size, 1)))
+                ref_wav = np.tile(ref_wav, repeats)
+
+            prefix = f"{group_name}_{rank}_p{participant}_f{frame}"
+            sf.write(audio_dir / f"{prefix}_reconstructed_from_mel.wav", recon_wav, target_sr)
+            sf.write(audio_dir / f"{prefix}_reference_clip.wav", ref_wav, target_sr)
+
+
+def _save_long_failure_previews(
+    dataset,
+    worst_samples: List[Dict[str, float]],
+    target_sr: int,
+    n_fft: int,
+    out_dir: Path,
+    long_preview_seconds: float = 10.0,
+    max_cases: int = 3,
+) -> None:
+    """Export longer, continuous recon/reference audio windows for worst failure cases."""
+    if long_preview_seconds <= 0:
+        return
+
+    audio_dir = out_dir / "audio_previews_long"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+
+    frame_size_samples = dataset.preprocessor.frame_size_samples
+    hop_size_samples = dataset.preprocessor.hop_size_samples
+    approx_frames = max(1, int(round(float(long_preview_seconds) * target_sr / hop_size_samples)))
+    half_window = max(1, approx_frames // 2)
+
+    for rank, rec in enumerate(worst_samples[:max_cases], start=1):
+        base_idx = int(rec["base_idx"])
+        participant = int(rec["participant"])
+        frame = int(rec["frame"])
+
+        if dataset.X.ndim == 3:
+            window_indices = _collect_window_indices(dataset, participant, frame, half_window)
+            if not window_indices:
+                window_indices = [base_idx]
+            mel_seq = _build_mel_sequence_from_window(dataset, window_indices)
+            recon_wav = _reconstruct_from_mel_sequence(
+                mel_sequence_db=mel_seq,
                 target_sr=target_sr,
                 n_fft=n_fft,
                 hop_size_samples=hop_size_samples,
                 frame_size_samples=frame_size_samples,
             )
+            start_frame = int(dataset.index_meta[window_indices[0]]["frame"])
+            num_frames = len(window_indices)
+        else:
+            recon_wav = dataset.X[base_idx].astype(np.float32)
+            start_frame = frame
+            num_frames = 1
 
-            audio_path = _resolve_audio_path(dataset, participant)
-            ref_wav = _extract_reference_clip(
-                audio_path=audio_path,
-                frame_index=frame,
-                target_sr=target_sr,
-                frame_size_samples=frame_size_samples,
-                hop_size_samples=hop_size_samples,
-            )
+        audio_path = _resolve_audio_path(dataset, participant)
+        ref_wav = _extract_reference_clip(
+            audio_path=audio_path,
+            start_frame=start_frame,
+            num_frames=num_frames,
+            target_sr=target_sr,
+            frame_size_samples=frame_size_samples,
+            hop_size_samples=hop_size_samples,
+        )
 
-            prefix = f"{group_name}_{rank}_p{participant}_f{frame}"
-            sf.write(audio_dir / f"{prefix}_reconstructed_from_mel.wav", recon_wav, target_sr)
-            sf.write(audio_dir / f"{prefix}_reference_clip.wav", ref_wav, target_sr)
+        prefix = f"worst_long_{rank}_p{participant}_f{frame}_{int(long_preview_seconds)}s"
+        sf.write(audio_dir / f"{prefix}_reconstructed_from_mel.wav", recon_wav, target_sr)
+        sf.write(audio_dir / f"{prefix}_reference_clip.wav", ref_wav, target_sr)
 
 
 def main() -> None:
@@ -260,6 +371,16 @@ def main() -> None:
         "--artifacts_dir",
         type=str,
         default="analysis/artifacts",
+    )
+    parser.add_argument(
+        "--preview_seconds",
+        type=float,
+        default=2.0,
+    )
+    parser.add_argument(
+        "--long_preview_seconds",
+        type=float,
+        default=0.0,
     )
     args = parser.parse_args()
 
@@ -450,6 +571,16 @@ def main() -> None:
         target_sr=int(config["semantic_mapping"]["target_sr"]),
         n_fft=n_fft_val,
         out_dir=artifacts_dir,
+        preview_seconds=float(args.preview_seconds),
+    )
+
+    _save_long_failure_previews(
+        dataset=dataset,
+        worst_samples=worst_samples,
+        target_sr=int(config["semantic_mapping"]["target_sr"]),
+        n_fft=n_fft_val,
+        out_dir=artifacts_dir,
+        long_preview_seconds=float(args.long_preview_seconds),
     )
 
     print(f"Analysis written to: {out_path}")

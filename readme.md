@@ -107,14 +107,9 @@ $env:PYTHONPATH='.'; & ".venv/Scripts/python.exe" training/evaluate_semantic_map
 	- $env:PYTHONPATH='.'; & ".venv/Scripts/python.exe" training/analyze_semantic_mapper.py --config configs/semantic_mapping.yaml --checkpoint checkpoints/semantic_mapper/best.pt --output analysis/semantic_performance_report.json
 	- report: analysis/semantic_performance_report.json
 	- artifacts (plots, csv, and listenable reconstructed audio previews):
-		- $env:PYTHONPATH='.'; & ".venv/Scripts/python.exe" training/analyze_semantic_mapper.py --config configs/semantic_mapping.yaml --checkpoint checkpoints/semantic_mapper/best.pt --output analysis/semantic_performance_report.json --artifacts_dir analysis/artifacts
+		- $env:PYTHONPATH='.'; & ".venv/Scripts/python.exe" training/analyze_semantic_mapper.py --config configs/semantic_mapping.yaml --checkpoint checkpoints/semantic_mapper/best.pt --output analysis/semantic_performance_report.json --artifacts_dir analysis/artifacts --preview_seconds 2.0
+		- long failure-case previews (example 12s):
+			- $env:PYTHONPATH='.'; & ".venv/Scripts/python.exe" training/analyze_semantic_mapper.py --config configs/semantic_mapping.yaml --checkpoint checkpoints/semantic_mapper/best.pt --output analysis/semantic_performance_report.json --artifacts_dir analysis/artifacts --preview_seconds 2.0 --long_preview_seconds 12.0
 		- plots: analysis/artifacts/plots/
 		- audio previews: analysis/artifacts/audio_previews/
-
-## Removed from Scope
-
-The following were removed to keep the implementation aligned with the final objective:
-
-- visual feature assets and visual model code
-- text and multimodal legacy paths
-- deprecated training/inference scripts unrelated to waveform -> semantic mapping
+		- long audio previews: analysis/artifacts/audio_previews_long/
