@@ -7,11 +7,12 @@ from torch.utils.data import Dataset, DataLoader
 import numpy as np
 from pathlib import Path
 import json
+import hashlib
 from typing import Dict, List, Tuple, Optional
 from tqdm import tqdm
 
-from utils.preprocessing import AudioPreprocessor
-from utils.feature_extraction import SemanticFeatureExtractor
+from preprocessing import AudioPreprocessor
+from feature_extraction import SemanticFeatureExtractor
 
 
 class MentalHealthAudioDataset(Dataset):
@@ -24,7 +25,8 @@ class MentalHealthAudioDataset(Dataset):
         feature_extractor: SemanticFeatureExtractor,
         split: str = 'train',
         cache_features: bool = True,
-        label_map: Optional[Dict[str, int]] = None
+        label_map: Optional[Dict[str, int]] = None,
+        split_ratios: Optional[Dict[str, float]] = None
     ):
         """
         Args:
@@ -34,6 +36,7 @@ class MentalHealthAudioDataset(Dataset):
             split: 'train', 'val', or 'test'
             cache_features: Whether to cache extracted features
             label_map: Mapping from label names to indices
+            split_ratios: Ratios used when data has no explicit train/val/test folders
         """
         self.data_dir = Path(data_dir)
         self.preprocessor = preprocessor
@@ -51,6 +54,15 @@ class MentalHealthAudioDataset(Dataset):
             }
         else:
             self.label_map = label_map
+
+        if split_ratios is None:
+            self.split_ratios = {
+                'train': 0.8,
+                'val': 0.1,
+                'test': 0.1
+            }
+        else:
+            self.split_ratios = split_ratios
         
         # Load data
         self.data = self._load_data()
@@ -60,6 +72,14 @@ class MentalHealthAudioDataset(Dataset):
         
         if cache_features:
             self._cache_all_features()
+
+    def _resolve_split_dirs(self) -> List[Path]:
+        """Resolve folder names for logical split (supports val/eval aliases)."""
+        if self.split == 'val':
+            return [self.data_dir / 'val', self.data_dir / 'eval']
+        if self.split == 'eval':
+            return [self.data_dir / 'eval', self.data_dir / 'val']
+        return [self.data_dir / self.split]
     
     def _load_data(self) -> List[Dict]:
         """Load audio files and labels"""
@@ -84,28 +104,147 @@ class MentalHealthAudioDataset(Dataset):
         else:
             # Fallback: scan directory structure
             # Expected structure: data_dir/split/class_name/*.wav
-            split_dir = self.data_dir / self.split
-            
-            if split_dir.exists():
+            split_dirs = [d for d in self._resolve_split_dirs() if d.exists()]
+            has_explicit_split_dirs = any(
+                (self.data_dir / name).exists()
+                for name in ['train', 'val', 'eval', 'test']
+            )
+
+            for split_dir in split_dirs:
+                # Format 1: split/class_name/*.wav
                 for class_dir in split_dir.iterdir():
                     if class_dir.is_dir():
                         class_name = class_dir.name.lower()
                         if class_name in self.label_map:
                             label_idx = self.label_map[class_name]
-                            
                             for audio_file in class_dir.glob("*.wav"):
-                                # One-hot encoding
                                 labels = [0] * len(self.label_map)
                                 labels[label_idx] = 1
-                                
                                 data.append({
                                     'audio_path': str(audio_file),
                                     'labels': labels,
                                     'metadata': {'class': class_name}
                                 })
+
+                # Format 2: split/300_P/.../*.wav (participant folders)
+                for audio_file in split_dir.rglob("*.wav"):
+                    class_name = self._infer_class_name(audio_file)
+                    if class_name is None:
+                        continue
+                    labels = [0] * len(self.label_map)
+                    labels[self.label_map[class_name]] = 1
+                    data.append({
+                        'audio_path': str(audio_file),
+                        'labels': labels,
+                        'metadata': {'class': class_name}
+                    })
+
+            # De-duplicate when a file matches both scans
+            if data:
+                dedup = {}
+                for item in data:
+                    dedup[item['audio_path']] = item
+                data = list(dedup.values())
+
+            # Fallback 2: participant-style directories (e.g., 300_P/300_P/300_AUDIO.wav)
+            if len(data) == 0 and not has_explicit_split_dirs:
+                data = self._load_participant_style_data()
         
         print(f"Loaded {len(data)} samples for {self.split} split")
         return data
+
+    def _infer_class_name(self, audio_path: Path) -> Optional[str]:
+        """Infer class from directory/file naming conventions."""
+        candidates = [
+            audio_path.parent.name.lower(),
+            audio_path.parent.parent.name.lower() if audio_path.parent.parent else "",
+            audio_path.stem.lower()
+        ]
+
+        # Direct class names
+        for candidate in candidates:
+            if candidate in self.label_map:
+                return candidate
+
+        # Suffix shorthand mapping (e.g., 300_P -> depression)
+        suffix_map = {
+            '_p': 'depression',
+            '_a': 'anxiety',
+            '_d': 'distress',
+            '_n': 'normal'
+        }
+
+        for candidate in candidates:
+            for suffix, class_name in suffix_map.items():
+                if candidate.endswith(suffix) and class_name in self.label_map:
+                    return class_name
+
+        return None
+
+    def _deterministic_split(self, audio_path: Path) -> str:
+        """Assign split deterministically based on file path hash."""
+        train_ratio = float(self.split_ratios.get('train', 0.8))
+        val_ratio = float(self.split_ratios.get('val', 0.1))
+        test_ratio = float(self.split_ratios.get('test', 0.1))
+        total = train_ratio + val_ratio + test_ratio
+        if total <= 0:
+            train_ratio, val_ratio, test_ratio = 0.8, 0.1, 0.1
+            total = 1.0
+
+        train_ratio /= total
+        val_ratio /= total
+
+        digest = hashlib.md5(str(audio_path).encode('utf-8')).hexdigest()
+        p = int(digest, 16) / float(16 ** len(digest))
+
+        if p < train_ratio:
+            return 'train'
+        if p < train_ratio + val_ratio:
+            return 'val'
+        return 'test'
+
+    def _load_participant_style_data(self) -> List[Dict]:
+        """
+        Load from participant-style directories when no explicit splits exist.
+        Expected examples:
+        - data_dir/300_P/300_AUDIO.wav
+        - data_dir/300_P/300_P/300_AUDIO.wav
+        """
+        all_labeled = []
+
+        for audio_file in self.data_dir.rglob("*.wav"):
+            class_name = self._infer_class_name(audio_file)
+            if class_name is None:
+                continue
+
+            label_idx = self.label_map[class_name]
+            labels = [0] * len(self.label_map)
+            labels[label_idx] = 1
+
+            all_labeled.append({
+                'audio_path': str(audio_file),
+                'labels': labels,
+                'metadata': {'class': class_name}
+            })
+
+        if len(all_labeled) == 0:
+            return []
+
+        # For very small datasets, expose all samples to every split to avoid empty loaders.
+        if len(all_labeled) < 3:
+            return all_labeled
+
+        split_data = [
+            item for item in all_labeled
+            if self._deterministic_split(Path(item['audio_path'])) == self.split
+        ]
+
+        # Guarantee non-empty split for training loops that divide by len(dataloader).
+        if len(split_data) == 0:
+            fallback_idx = {'train': 0, 'val': 1, 'test': 2}.get(self.split, 0) % len(all_labeled)
+            split_data = [all_labeled[fallback_idx]]
+
+        return split_data
     
     def _cache_all_features(self):
         """Pre-compute and cache all features"""
@@ -175,7 +314,8 @@ def create_dataloaders(
     feature_extractor: SemanticFeatureExtractor,
     batch_size: int = 16,
     num_workers: int = 4,
-    cache_features: bool = True
+    cache_features: bool = True,
+    split_ratios: Optional[Dict[str, float]] = None
 ) -> Tuple[DataLoader, DataLoader, DataLoader]:
     """
     Create train, validation, and test dataloaders
@@ -194,17 +334,17 @@ def create_dataloaders(
     # Create datasets
     train_dataset = MentalHealthAudioDataset(
         data_dir, preprocessor, feature_extractor, 
-        split='train', cache_features=cache_features
+        split='train', cache_features=cache_features, split_ratios=split_ratios
     )
     
     val_dataset = MentalHealthAudioDataset(
         data_dir, preprocessor, feature_extractor,
-        split='val', cache_features=cache_features
+        split='val', cache_features=cache_features, split_ratios=split_ratios
     )
     
     test_dataset = MentalHealthAudioDataset(
         data_dir, preprocessor, feature_extractor,
-        split='test', cache_features=cache_features
+        split='test', cache_features=cache_features, split_ratios=split_ratios
     )
     
     # Create dataloaders

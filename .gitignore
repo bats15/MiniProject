@@ -1,6 +1,7 @@
 venv/*
 .venv/*
-DATA
+data
 data_small
 logs_small
 data_test
+300_P
